@@ -9,9 +9,7 @@ let projectName = "FeatureSwitcher.Contexteer"
 
 TraceEnvironmentVariables()
 
-let version = if isLocalBuild then getBuildParamOrDefault "version" "0.0.0.1" else buildVersion
-let packageVersion = getBuildParamOrDefault "packageVersion" version
-
+let ReleaseCandidate = getBuildParamOrDefault "releaseCandidate" (System.DateTime.Now.ToString("yyyyMMddHHmmss"))
 let NugetKey = getBuildParamOrDefault "nuget.key" ""
 
 (* Directories *)
@@ -27,22 +25,25 @@ let deployDir = "./Release/"
 (* files *)
 let slnReferences = !! (sourceDir @@ "*.sln")
 
+(* helper functions *)
+let packageVersion() =
+    let projectAssembly = buildDir @@ (sprintf "%s.dll" projectName)
+
+    let assemblyName = System.Reflection.AssemblyName.GetAssemblyName(projectAssembly)
+
+    let version = assemblyName.Version.ToString(3)
+
+    if ReleaseCandidate = "false" then
+        version
+    else
+        sprintf "%s-rc%s" version ReleaseCandidate
+
 let DependsOn package =
     package, GetPackageVersion packagesDir package
 
 (* Targets *)
 Target "Clean" (fun _ -> 
     CleanDirs [buildDir; testDir; testOutputDir; nugetDir; deployDir]
-)
-
-Target "SetAssemblyInfo" (fun _ ->
-    ReplaceAssemblyInfoVersions
-        (fun p ->
-        {p with
-            AssemblyVersion = version;
-            AssemblyFileVersion = version;
-            AssemblyInformationalVersion = version;
-            OutputFileName = sourceDir @@ projectName @@ "/Properties/AssemblyInfo.cs"})
 )
 
 Target "BuildApp" (fun _ ->
@@ -66,7 +67,7 @@ FinalTarget "DeployTestResults" (fun () ->
 Target "BuildZip" (fun _ ->
     !! (buildDir @@ sprintf "/%s.*" projectName)
       -- "**/*Specs*"
-        |> Zip buildDir (deployDir @@ sprintf "%s-%s.zip" projectName version)
+        |> Zip buildDir (deployDir @@ sprintf "%s-%s.zip" projectName (packageVersion()))
 )
 
 Target "BuildNuGet" (fun _ ->
@@ -83,7 +84,7 @@ Target "BuildNuGet" (fun _ ->
             Authors = authors
             Project = projectName
             Description = ""
-            Version = packageVersion
+            Version = packageVersion()
             Dependencies = [DependsOn "Contexteer"; DependsOn "FeatureSwitcher"]
             OutputPath = nugetDir
             WorkingDir = nugetDir
@@ -95,15 +96,25 @@ Target "BuildNuGet" (fun _ ->
         |> CopyTo deployDir
 )
 
+Target "NotifyTeamCity" (fun _ ->
+    let setParameter name value =
+        sprintf "##teamcity[setParameter name='%s' value='%s']"
+            (EncapsulateSpecialChars name)
+            (EncapsulateSpecialChars value)
+        |> sendStrToTeamCity
+
+    setParameter "env.packageVersion" (packageVersion())
+)
+
 Target "Default" DoNothing
 
 // Build order
 "Clean"
-  ==> "SetAssemblyInfo"
   ==> "BuildApp"
   ==> "Test"
   ==> "BuildZip"
   ==> "BuildNuGet"
+  =?> ("NotifyTeamCity", TeamCity = buildServer)
   ==> "Default"
 
 // start build
